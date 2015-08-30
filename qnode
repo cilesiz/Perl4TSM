@@ -29,7 +29,7 @@ use strict;
 use warnings;
 use File::Basename;
 ### Make the path in the following line point to the right place ###
-use lib '/usr/share/perl/tsmlib/perllib';
+use lib 'perllib';
 use TSM::Creds;
 use Getopt::Long qw(:config posix_default);
 use Term::ANSIColor qw(:constants);

@@ -16,7 +16,7 @@
 use strict;
 use warnings;
 # Change this path
-use lib 'xxx/TSM/perllib';
+use lib 'perllib';
 use TSM::Creds;
 use Getopt::Long qw(:config posix_default);
 $SIG{INT} = \&catch_int;
