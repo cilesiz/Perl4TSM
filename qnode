@@ -1,0 +1,267 @@
+#!/usr/bin/perl
+#   .   .   .   .   .   .   .   .   .   .   .   .   .   .   .   .
+#  .                                                              .
+#  .                         ' q n o d e '                        .
+#  .                                                              .
+#  .  Author: Eric (E.) de Hont                                   .
+#  .                                                              .
+#  .  Date:   Wed May 16 09:15:33 CED 2012                        .
+#  .                                                              .
+#  .  Short description:                                          .
+#  .                                                              .
+#  .    Display node information of backup information of an node .
+#  .                                                              .
+#   .   .   .   .   .   .   .   .   .   .   .   .   .   .   .   .
+# ------------------------------------------------------------
+# (c)Eric de Hont: Fri May  5 07:54:34 CED 2006
+# Installation:
+# - ln qnode qback      # mode of execution depends on name.
+# -H-i-s-t-o-r-y-:--------------------------------------------
+# Mon May 21 17:32:34 CED 2012
+#   Added EYE-candy (shadow-effect) which dissappears
+#   when run non-interactively (in a pipe)
+#   Removing user-provided wildcard '*' at the start
+#     of the node name. 
+# Mon Dec  9 11:46:01 CET 2013
+#   Print error messages below output
+# ------------------------------------------------------------
+use strict;
+use warnings;
+use File::Basename;
+### Make the path in the following line point to the right place ###
+use lib '/usr/share/perl/tsmlib/perllib';
+use TSM::Creds;
+use Getopt::Long qw(:config posix_default);
+use Term::ANSIColor qw(:constants);
+$SIG{INT} = \&catch_int;
+
+# See perldoc Getopt::Long
+my $opt_help;
+my $globbing=1; # Default on
+my $startglob=1; # Default on
+my $endglob=1; # Default on
+GetOptions('help|?' => \$opt_help,
+					 'globbing|g!' => \$globbing,
+					 'startglob|s!' => \$startglob,
+					 'endglob|e!' => \$endglob)
+					 or die "Couldn't parse options: $!\n";
+
+exec (qq/perldoc $0/) if $opt_help; # Exit showing documentation
+
+if ($globbing){
+  $startglob = $startglob?'*':'';
+  $endglob = $endglob?'*':'';
+}else{
+  ($startglob,$endglob) = ('','');
+}
+
+$| = 1; # No output buffering
+
+# Get options
+
+# Define some constants
+my $myself = basename $0;
+
+## New credentials thingy
+
+my $TC = TSM::Creds->new();
+die "No valid credentials found. Run tsmcreds first.\n" unless $TC->ok;
+
+my $id = $TC->id;
+my $pw = $TC->pa;
+##############################
+
+my $line =  '-' x 50 . "\n" ;
+my $TSMserv = 'tsmm000' ; # Route commands through primary management server
+ 
+sub usage {
+  exec (qq/perldoc $0/);
+  exit ;
+  }
+ 
+@ARGV == 1 or usage ;
+# strip away user provided wildcard
+$ARGV[0] =~ s/^\*+//;
+$ARGV[0] =~ s/\*+$//;
+ 
+# You can call me with different names
+my $cmd ;
+for ($myself) {
+# if    (/qnode/)       { $cmd="q node $startglob$ARGV[0]$endglob" }
+  if    (/qnode/)       { 
+													$startglob = $startglob?'%':'';
+													$endglob   = $endglob?'%':'';
+													my $fields = 
+													qq/node_name as "Node",varchar(substr(contact,2,1),1) as "E",left(platform_name,12) as "Platf",/.
+													qq/left(domain_name,12) as "Domain",/.
+													qq/varchar(day(abs(lastacc_time-current_timestamp)),7) as "LastAcc",/.
+													qq/varchar(day(abs(pwset_time-current_timestamp)),5) as "PWset",varchar(locked,6) as "Locked",/.
+													qq/varchar(invalid_pw_count,5) as "InvPW"/;
+													$fields =~ s/"/\\$&/g;
+													$cmd="select ".$fields." from nodes where node_name like \'${startglob}".uc($ARGV[0])."${endglob}\'" }
+  elsif (/qback/)       { $cmd="q ev * * begind=-7 endd=+1 nodes=$startglob$ARGV[0]$endglob" }
+  else                  { print $line, "$myself? \e[1;31;5mDon't call me that!\e[0m\n"; usage }
+  }
+print "Command: $cmd\n"; 
+my @DSMOUT = `dsmadmc -id=$id -pa=$pw -server=$TSMserv "all: $cmd"` ;
+
+@DSMOUT or die "No response from $TSMserv\n";
+grep {/^ANR1699I/} @DSMOUT or die "No valid response from $TSMserv\n @DSMOUT $!\n";
+ 
+# Remove leading garbage up to and including 'Resolved ALL to 22 servers...'
+1 while ((shift @DSMOUT) !~ /^ANR1699I/) ;
+
+ 
+my @text ;
+my @errors;
+my $lineLength;
+foreach (@DSMOUT) {
+  if (/^ANR/) {
+    if (@text > 3) {
+      foreach (@text) {
+				chomp;
+				next if /^\s*$/;
+			  if (/TSM-server/){
+					if (EYE_candy()){
+					print BLACK ON_WHITE "\e[1G\e[K\n\e[1G\e[K";
+          print ' ' x 4, BOLD WHITE ON_CYAN " $_\n";
+					print BLACK ON_WHITE "\e[1G\e[K";
+          print ' ' x 4, UNDERSCORE BOLD BLACK ON_CYAN ' ' x length $_, RESET ON_BLACK ' ', RESET "\n" if EYE_candy();
+					}else{
+            print "$_\n";
+					}
+        }else{
+					$lineLength = length $_;
+					if (EYE_candy()){
+					  print BLACK ON_WHITE "\e[1G\e[K";
+            print ' ' x 4, BOLD YELLOW ON_GREEN " $_", RESET;
+						print WHITE ON_BLACK ' ', RESET unless /^Node/||/^Scheduled Start/;
+					  print BLACK ON_WHITE "\n\e[1G\e[K";
+            print ' ' x 4, BOLD YELLOW ON_GREEN ' ' x length $_, RESET ON_BLACK ' ';
+          }else{
+						print "$_\n";
+          }
+					print BLACK ON_WHITE "\e[1G\e[K" if EYE_candy();
+			 }
+			}
+      @text=() ;
+			print BLACK ON_WHITE "\e[1G\e[K" if EYE_candy();
+			print ' ' x 5, WHITE ON_BLACK ' ' x $lineLength, ' ', RESET "\n" if EYE_candy();
+			print BLACK ON_WHITE "\e[1G\e[K", RESET "\n" if EYE_candy();
+			print "\n" if not EYE_candy();
+      }
+
+    } else { push @text, $_ }
+
+  if (/^ANR1687I/) {
+    s/^.*server (\S*) follows/TSM-server $1/ ;
+		@text = "\n";
+    push @text, "$_" ;
+		next;
+    }
+
+  if (/^ANR4373E/) {
+    push @errors,$_;
+    push @errors,"\tPerhaps admin $id is locked on this TSM instance?\n";
+    next;
+    }
+
+  if (/^ANR\d{4}E/){
+    push @errors,$_ unless /^ANR2034E/||/^ANR2624E/;
+    next;
+  }
+}
+
+if (@errors){
+  unshift @errors,"\n";
+  chomp $errors[-1];
+  print BLACK ON_RED "@errors";
+  print RESET "\n";
+}
+
+sub I_am_interactive{
+  return -t STDIN && -t STDOUT;
+}
+
+{
+  my ($height,$width); # Persistent between subroutine calls
+  sub EYE_candy{
+		#unless($width){
+		if (I_am_interactive()){
+      ($height,$width) = split(/\s/,`stty size`) or die "Couldn't determine screen size: $!\n";
+		}
+  	return I_am_interactive() && $width >= 103;
+  }
+}
+
+sub catch_int{
+  my $signame = shift;
+	print RESET; # Reset the colour settings.
+	die "\n\nSomebody sent me a SIG$signame\n";
+}
+
+=head1 NAME
+
+qnode qback - display node information or the recent schedules of a node
+
+=head1 Synopsys
+
+B<qnode [-?|-help|--noglobbing|--nog|--nostartglobbing|--nos|--noendglobbing|--noe]>
+
+By defult, this script places asterisks aroud the searched hosts, to also find UB_ and _TDP-hosts and the like. With --nostartglobbing or --nos you can suppress the first asterisk. With --noendglobbing or --noe you can suppress the second. With --noglobbing or --noe you suppress both.
+
+=head1 Description
+
+Called as I<qnode> it helps you locate a node and wheter it has TDP-subnodes or related UB_nodes. Called as I<qback> it displays the status of the recent backups.
+
+When the output is piped to another process, or the screen width is less than 103 characters, all ANSI-color coding is removed to simplify further processing.
+
+=head2 Options
+
+=over
+
+=item I<--h>elp I<--?>
+
+Show B<this> page
+
+=item B<--noglobbing|--nog>
+
+Don't prepend or append an asterisk before or after the clientname.
+
+=item B<--nostartglobbing|--nos>
+
+Don't place an asterisk in front of the clientname
+
+=item B<--noendglobbing|--noe>
+
+Don't place an asterisk after the clientname
+
+=back
+
+=head1 Examples
+
+=over
+
+=item B<qnode lin11477> 
+
+Display the characteristics of this client and where it lives.
+
+=item B<qback> lin11477>
+
+Display the status of the  backups of the last seven days, today and tomorrow.
+
+=back
+
+=head1 Author
+
+Eric (E.) de Hont eric-github@hobiho.nl
+
+=head1 To do
+
+Please mail the author for bugfixes, suggestions and donations.
+
+=head1 Related commands
+
+...
+
+=cut

@@ -1,0 +1,209 @@
+#!/usr/bin/perl
+#   .   .   .   .   .   .   .   .   .   .   .   .   .   .   .   .
+#  .                                                              .
+#  .                      ' t s m c r e d s '                     .
+#  .                                                              .
+#  .  Author: Eric de Hont eric-github@hobiho.nl                  .
+#  .                                                              .
+#  .  Date:   Wed Oct 17 09:29:11 CED 2012                        .
+#  .                                                              .
+#  .  Short description:                                          .
+#  .                                                              .
+#  .    Create or update TSMcreds file to be used by              .
+#  .      other scripts.                                          .
+#  .                                                              .
+#   .   .   .   .   .   .   .   .   .   .   .   .   .   .   .   .
+use strict;
+use warnings;
+# Change this path
+use lib 'xxx/TSM/perllib';
+use TSM::Creds;
+use Getopt::Long qw(:config posix_default);
+$SIG{INT} = \&catch_int;
+$|=1;
+
+# See perldoc Getopt::Long
+my ($opt_help,$opt_file); # Define your option vars here.
+GetOptions('help|?'  => \$opt_help,
+					'f|file:s' => \$opt_file) or die
+			"Couldn't parse options: $!\n";
+exec (qq/perldoc $0/) if $opt_help; # Exit showing documentation
+
+print `clear`;
+print "\t\t t s m c r e d s \n\n";
+mkcfg() unless -r "$0.cfg";
+open CONFIG,'<',"$0.cfg" or die "$0.cfg not found. $!\n";
+my %config;
+foreach (<CONFIG>){
+	chomp;
+  next if /^#/;
+	/(\S+)\s+(\S+)/;
+	$config{$1}=$2;
+}
+
+print "\tType your username and password to create or update a TSM credentials file\n".
+			"\tto be used with scripting like tsam.\n\n";
+# Create TSM-creds object
+my %options;
+$options{file} = $opt_file if $opt_file;
+my $TC = TSM::Creds->new(%options);
+print "(",$TC->error,")\n\n" unless $TC->ok;
+print "Storing credentials in file: ", $TC->file, "\n\n";
+# Remove current credentials from TSM::Creds object.
+$TC->reset;
+
+sub mkcfg{
+  die "Please check your access rights to $0.cfg" if -e "$0.cfg";
+  print `clear`;
+  print "\t\t t s m c r e d s \n\n";
+  print "\tThe config file $0.cfg can not be found. Create a new one? [Y/n]>";
+	chomp(my $choice=<STDIN>);
+	die "Terminating.\n" if $choice =~ /^N/i;
+	print "\tGenerating $0.cfg...\n";
+	open NEWCRED,'>',"$0.cfg" or die "Unable to create config file $0.cfg\n";
+	print NEWCRED qq/#---------------------------------------------------------------------\n/.
+	              qq/#\t\tTSMCREDS - config file\n/.
+								qq/#---------------------------------------------------------------------\n/.
+	              qq/#\tPlease change the default values as needed\n/.
+								qq/# Each line consist of an item name a space and a value.\n/.
+								qq/# Empty lines and lines starting with a # are ignored.\n/.
+								qq/# Delete this file to recreate it with the TSMCREDS-script.\n/.
+								qq/#---------------------------------------------------------------------\n/.
+								qq/# The TSM-configuration manager\n/.
+								qq/CFGMAN TSMM000\n/.
+								qq/# The browse only account 'userid:password'\n/.
+		            qq/BROWSER analist:analist\n/.
+		            qq/#---------------------------------------------------------------------/;
+  close NEWCRED;
+	my @vi_cfg = ('vi', "$0.cfg");
+	system(@vi_cfg) == 0 or die "Unable to edit the config-file using vi.$!\n";
+  print `clear`;
+  print "\t\t t s m c r e d s \n\n";
+}
+my ($username,$password);
+print "Enter username: ";
+chomp($username=<STDIN>);
+print "\n";
+
+my @TSMuserdata = grep {/Name:|Privilege:|Password Set Date\/Time:|Contact:|Invalid Sign-on Count:/} tsmGetUser("q ad $username f=d")
+	or die "User not found in TSM.\n";
+print map {"$_\n"} @TSMuserdata;
+
+print "\nEnter password (will not be displayed): ";
+system('stty','-echo');
+chomp($password=<STDIN>);
+system('stty','echo');
+print "\n";
+
+print "\nLogging in to TSM with the given credentials.\n";
+@TSMuserdata = tsmGetUser("q ad $username f=d")
+	or die "User not found in TSM.\n";
+print "OK\n\n";
+
+print "Create or update password file.\n";
+
+$TC->id($username);
+$TC->pa($password);
+
+print "Error: ",$TC->error,"\n" unless $TC->ok;
+
+print $TC->update ? "OK\n\n" : "Not OK\n";
+if (not $TC->ok){
+  print "Error: ",$TC->error,"\n";
+	exit;
+}
+
+print "Reading credentials from file...\n";
+print $TC->read ? "OK\n" : "Not OK\n";
+if (not $TC->ok){
+  print "Error: ",$TC->error,"\n";
+	exit;
+}
+
+print "\nLogging in with credentials from file.\n";
+@TSMuserdata = tsmGetUser("q ad $username f=d")
+	or die "User not found in TSM.\n";
+print "OK\n\n";
+
+print "All went well. Congratulations.\n\n";
+
+sub tsmGetUser{
+	my $cmd = shift or die "(tsmcommand) Not enough arguments.\n";
+	my ($id,$pa);
+	if ($TC->ok){
+		($id,$pa) = ($TC->id,$TC->pa);
+  }else{
+		($id,$pa) = (split /:/,$config{'BROWSER'});
+	}
+	my @output;
+	open my $fh, "dsmadmc -se=$config{'CFGMAN'} -id=$id -pa=$pa -displ=list -dataonly=yes $cmd|"
+		 or die "Cannot run dsmadmc: $!";
+	chomp(@output = <$fh>);
+	close $fh;
+	die "Unable to login to TSM!\nPassword file not updated.\n@output\n"
+	  if grep {/ANS8023E Unable to establish session with server./} @output;
+	return @output;
+}
+
+sub catch_int{ 
+  my $signame = shift; 
+  system('stty','echo'); # Reenable writing to screen before quitting.
+  die "\n\nSomebody sent me a SIG$signame\n"; 
+} 
+
+=head1 NAME
+
+tsmcreds - A script to create a secure .TSMCreds file containing encrypted TSM-credentials to be used by TSAM or other scripts.
+
+=head1 Synopsys
+
+B<tsmcreds [-?|-help|-f <filename>|--file=<filename>]>
+
+Update and check the .TSMCreds-file in your home directory.
+
+=head1 Description
+
+This script allows you to securely update the .TSMCreds-file and check whether the credentials are correct. It also makes sure the access rights of the file are secure.
+
+Use this command I<AFTER> you have changed your password in TSM.
+
+=head2 Options
+
+=over
+
+=item I<--h>elp I<--?>
+
+Show B<this> page
+
+=item I<-f <filename>|--file <filename>>
+
+Specify an alternative credentials file.
+
+=back
+
+=head1 Examples
+
+=over
+
+=item B<tsmcreds>
+
+Update your .TSMCreds-file.
+
+=item B<tsmcreds> --file=/appl/tsmserv/scripts/.TSMCredsSupport
+
+Create a credentials file for the support NPA.
+
+=back
+
+=head1 Author
+
+Eric de Hont eric-github@hobiho.nl
+
+
+=head1 Related information
+
+=item 'B<perldoc TSM::Creds>'
+
+=item 'B<perldoc perlpod>'
+
+=cut
