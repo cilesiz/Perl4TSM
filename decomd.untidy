@@ -1,0 +1,524 @@
+#!/usr/bin/perl
+#   .   .   .   .   .   .   .   .   .   .   .   .   .   .   .   .
+#  .                                                              .
+#  .                        ' d e c o m d '                       .
+#  .                                                              .
+#  .  Author: Eric de Hont - eric-github@hobiho.nl                .
+#  .                                                              .
+#  .  Date:   Mon Jan 13 17:32:13 CET 2014                        .
+#  .                                                              .
+#  .  Short description:                                          .
+#  .                                                              .
+#  .   Daemon to remove TSM-nodes running in the background       .
+#  .                                                              .
+#  .  Tue Feb 11 12:46:03 CET 2014                                .
+#  .                                                              .
+#  .                                                              .
+#  .                                                              .
+#   .   .   .   .   .   .   .   .   .   .   .   .   .   .   .   .
+use strict;
+use warnings;
+#use diagnostics;
+## Change this path!
+use lib 'perllib';
+use Getopt::Long qw(:config posix_default);
+# See perldoc Getopt::Long
+use POSIX qw/:sys_wait_h strftime/;
+use bigint;
+use Tie::File;
+use Fcntl;
+use IO::Socket;
+use Sys::Hostname;
+use Storable qw(nstore store_fd nstore_fd freeze thaw dclone);
+
+my $opt_help; # Define your option vars here.
+GetOptions('help|h|?' => \$opt_help) or die
+			"Couldn't parse options: $!\n";
+if ($opt_help){
+  die "\tPerldoc could not be executed: $!\n" unless
+    exec (qq[perldoc $0]); # Exit showing documentation
+};
+
+my $systemdir = "$ENV{HOME}/.decomd";
+my $workdir = "$ENV{HOME}/Decom";
+my $socket  = "${systemdir}/decomd.sock";
+my $daemon_started = 'Daemon started at '.dateNow().' '.timeNow();
+
+# 2000 lines is log enough for this log file
+truncate_file("${systemdir}/decomd.log",2000);
+
+## Check if deamon already running
+if (-e "$systemdir/pid"){
+  open PID,"<$systemdir/pid" or die "Unable to open $systemdir/pid: $!\n";
+  chomp(my $pid = <PID>);
+  close PID;
+	if ($pid !~ /^\d+$/){
+    warn "PID is not an integer: $pid\nDiscarding value.\n";
+	}else{
+	  # kill 0, LIST returns the number of valid process numbers in list.
+	  # A signal 0 doesn't kill anything at all.
+    die "OK: decomd is already running.\n" unless (kill 0,$pid) == 0;
+	}
+}
+
+my $TSMC = '/appl/tsmserv/scripts/tools/dsmadmc2';
+die "dsmadmc2 (dsmadmc with authentication) not found." unless -X $TSMC;
+
+## Replace with correct names for your configuration
+my %configmanager = (   aix1234 => 'tsmcfg',
+					    sun0078 => 'tsmcfg2');
+my $hostname = hostname;
+my $cfgmgr = $configmanager{$hostname};
+
+createDirs();
+
+## Make the main Arrays persistent.
+tie my @_input, 'Tie::File', "${workdir}/decom_input_queue"
+	or die "unable to tie \@_input to ${workdir}/decom_input_queue: $!\n";
+tie my @_jobs, 'Tie::File', "${workdir}/decom_job_queue"
+	or die "unable to tie \@_input to ${workdir}/decom_job_queue: $!\n";
+tie my @_finished, 'Tie::File', "${workdir}/decom_finished_".strftime("%Y%m%d", localtime)
+	or die "unable to tie \@_input to ${workdir}/decom_finished: $!\n";
+
+## Don't let my children become zombies
+$SIG{CHLD} = 'IGNORE';
+
+## See chapter 16 of Perl Cookbook
+my $pid = fork;
+
+if (! $pid){
+## Background process
+  die "Couldn't fork: $!" unless defined $pid;
+
+  for my $handle (*STDIN, *STDOUT, *STDERR){
+    open ($handle, "+<", "/dev/null")
+                || die "Can't reopen $handle to /dev/null: $!";
+  }
+
+  open(FH, ">>", "${systemdir}/decomd.log") or die "Unable to open ${systemdir}/decomd.log $!";
+  select(FH) or die "Unable to select outputfile. $!";
+  *STDERR = *FH or die "Unable to redirect STDERR: $!";
+  ## Autoflush
+  $|=1;
+
+  POSIX::setsid()
+        or die "Can't start a new session: $!";
+
+  my $time_to_die = 0;
+
+  sub signal_handler {
+		my $signame = shift;
+	  my $date = dateNow().' '.timeNow();
+    print "$date: Exiting because I received a $signame SIGNAL.\n";
+    exit;
+  }
+
+  $SIG{INT} = $SIG{TERM} = $SIG{HUP} = \&signal_handler;
+  print "$daemon_started\n";
+
+## See chapter 17 of Perl Cookbook (17.6 Using Unix Domain Sockets)
+	unlink $socket;
+	my $server = IO::Socket::UNIX->new(
+        Local			=> $socket,
+		Type				=> SOCK_STREAM,
+		Reuse			=> 1,
+		Listen			=> 5 ) or die "Could not create socket: $@ $!";
+## Main loop ##################
+	timeStamp();
+	while (active()){
+   	eval {
+ 		local $SIG{ALRM} = sub { die "alarm clock restart" };
+  		alarm 20;			# schedule alarm 20 seconds
+  		eval {
+  					#############
+		          ## Listen on socket with time out
+		          my $client;
+							while ($client = $server->accept()){
+  						## Autoflush
+						  $|=1;
+							my $clnt_msg = <$client>;
+  						print "<$clnt_msg\n";
+							for ($clnt_msg)  {
+								if		(/^DECOM:/)	  { Communicate($client,add_to_queue($clnt_msg)) }
+								elsif	(/^status/)		{ Communicate($client,status()."\n") }
+								elsif	(/^date/)			{ Communicate($client,dateNow()."\n") }
+								elsif	(/^time/)			{ Communicate($client,timeNow()."\n") }
+								elsif	(/^input/)	  { Communicate($client,\@_input) }
+								elsif	(/^finished/)	{ Communicate($client,\@_finished) }
+							 #elsif	(/^running/)	{ Communicate($client,\@_jobs) }
+								elsif	(/^running/)	{ show_running($client) }
+								else								{ Communicate($client,"Invalid command: \'$clnt_msg.\'") }
+								}
+							}
+  					#############
+  		};
+  		alarm 0;
+  	};
+  	alarm 0;
+  	die "Error in ALARM: $!" if $@ && $@ !~ /alarm clock restart/; #reraise
+  print dateNow().' '.timeNow().": Still running...\n";
+	process_DECOM();
+  }
+## Autoflush
+$|=1;
+	print dateNow().' '.timeNow().": Exiting due to inactivity.\n";
+	close($server);
+}
+        else
+{
+  # This is the foreground process.
+  print "Started proces $pid.\n";
+  open PID,">$systemdir/pid" or die "Unable to open $systemdir/pid: $!\n";
+  print PID $pid;
+  close PID;
+}
+
+sub process_DECOM{
+  alarm 0; # Turn of alarm
+	job_queue() if @_jobs;    # Process the items in the job queue
+	input_queue() if @_input; # Process the items in the input queue
+}
+
+sub input_queue{
+	timeStamp();
+	my %nr_of_delprocs = (); # Don't keep asking the same question during this loop
+  for my $index (0 .. $#_input){
+		timeStamp();
+		if($_input[0] =~ /^$/){
+			shift @_input;
+			next;
+		}
+		my (undef,$instance,$node,$timestamp) = split(' ', $_input[0]);
+		$timestamp =~ s/TIME_//;
+		if ($timestamp == 0){
+			# Start of decommissioning if node exists
+			my ($msgs_ref,$fields_ref) = tsmc($instance,qq/"select node_name from nodes where node_name='$node'"/);
+			unless (grep {/^ANR2034E/} @$msgs_ref){
+			  # Assign to undefs: We don't really care about the outcome... Do we?
+	      print "DECOM: Start of decommissioning of node ${node}.\n";
+	      (undef,undef) = tsmc($instance,qq/"issue message i 'DECOM: Start of decommissioning of node ${node}.'"/);
+			}
+		}
+#	print "sub input_queue: $instance; Node: $node; Timestamp: $timestamp\n";
+		if ($timestamp > time()){ # Node has a time penalty. Put it at the end of the list.
+			push(@_input, shift(@_input));
+			next;
+		}
+		my ($msgs_ref,$fields_ref) = tsmc($instance, qq/"lock node $node"/);
+		my $check = grep {/^ANR206(4|5)I/} @$msgs_ref;
+ 		if ($check){
+	 		# Less than 3 'DELETE FILESPACE' processes on instance?
+			$nr_of_delprocs{$instance} = df_count($instance) unless $nr_of_delprocs{$instance};
+ 			if ($nr_of_delprocs{$instance} < 3){
+				# Remove node
+				my $finished_or_del_f = rm_node($instance,$node);
+				$nr_of_delprocs{$instance} = 0;
+				for ($finished_or_del_f) {
+					if		(/Finished/) {shift @_input } # Throw item out of the input queue
+					else	{ $_input[0] = "DECOM: $instance $node PROC_${finished_or_del_f}";
+									# Promote item to job list
+									push(@_jobs, shift(@_input));
+									print "Node $node of instance $instance placed on job list.\n"}
+					}
+			}else{
+				# Instance busy. Give the node a time penalty of 3 minutes.
+				$timestamp = time() + 60*3;
+				$_input[0] = "DECOM: $instance $node TIME_$timestamp";
+				push(@_input, shift(@_input));
+			}
+ 		}else{
+			# Server did not give a valid response
+			# Give node a penalty of 30 minutes
+			$timestamp = time() + 60x30;
+			$_input[0] = "DECOM: $instance $node TIME_$timestamp";
+			push(@_input, shift(@_input));
+ 		}
+ 	}
+}
+
+## Show running jobs
+sub show_running{
+ 	my $client = shift;
+  my @jobinfo;
+	unless(@_jobs){
+    push @jobinfo,"No running jobs\n";
+    Communicate($client,\@jobinfo);
+		return;
+	}
+  foreach(@_jobs){
+		next if /^$/;
+    my (undef,$instance,$node,$proc_nr) = split(' ',$_) ;
+		push @jobinfo,"DECOM: $instance, $node";
+		$proc_nr =~ s/PROC_//;
+ 		my ($msgs_ref,$fields_ref) = tsmc($instance,qq/"select * from processes where process_num=${proc_nr}"/);
+ 		my @errors = grep { /AN.\d{4}E/ } @$msgs_ref;
+ 		if (@errors){
+ 			push @jobinfo,"\tJob finished or cancelled?";
+ 			push @jobinfo,chomp(@errors);
+ 		}
+ 		push @jobinfo,"\t$$fields_ref{PROCESS_NUM}: $$fields_ref{PROCESS} FILES_PROCESSED: $$fields_ref{FILES_PROCESSED}";
+ 		push @jobinfo,"\tStatus: $$fields_ref{STATUS}\n";
+ 	}
+  Communicate($client,\@jobinfo);
+	return;
+}
+
+## Scan the job queue for finished jobs
+sub job_queue{
+	timeStamp();
+	for my $index (0 .. $#_jobs){
+		if($_jobs[0] =~ /^$/){
+			shift @_jobs;
+			next;
+		}
+		my (undef,$instance,$node,$proc_nr) = split(' ', $_jobs[0]);
+		$proc_nr =~ s/PROC_//;
+		$proc_nr = 0 unless $proc_nr; # Dirty trick for when proc_nr is empty. Should'nt happen.
+		print "sub job_queue: Record: $_jobs[0]; Proc: $proc_nr\n";
+		######################################################### TEST
+	 	# Does del files process still exist?
+	  my ($msgs_ref,$fields_ref) = tsmc($instance,qq/"select * from processes where process_num=$proc_nr"/);
+		if (grep {/ANR2034E/} @$msgs_ref){
+			my $finished_or_del_f = rm_node($instance,$node);
+      for ($finished_or_del_f) {
+		 	if		(/Finished/) {shift @_jobs}
+		 	else	{ $_jobs[0] = "DECOM: $instance $node PROC_${finished_or_del_f}";
+		 					push(@_jobs, shift(@_jobs))}
+		 	}
+		}
+		push(@_jobs, shift(@_jobs));
+	}
+}
+
+sub rm_node{
+  my $instance = shift;
+	my $node = shift;
+  # Try to remove node
+	# If fail: remove filespaces, place node on job list
+	# If succes: place node on finished list
+	# ANR2152E REMOVE NODE: Inventory references still exist for node VLINUX000569_TST01.
+	# ANR2061I Node VLINUX000569_TST01 removed from policy domain UNIX.
+	# ANR2146E REMOVE NODE: Node VLINUX000002_DEV01 is not registered.
+	my ($msgs_ref,$fields_ref) = tsmc($instance, qq/"rem node $node"/);
+	my $return = (grep { /^(ANR2152E|ANR2061I|ANR2146E)/ } @$msgs_ref)[0];
+  for ($return) {
+		if		(/^ANR2152E/) {return del_files($instance,$node)}
+		elsif	(/^ANR2061I/) { (undef,undef) =  tsmc($instance,qq/"issue message i 'DECOM: Decommissioning of node ${node} finished.'"/);
+													push @_finished, grep { /ANR2061I/ } @$msgs_ref;
+													print "$instance $node finished!\n";return "Finished"}
+		elsif	(/^ANR2146E/) { (undef,undef) = tsmc($instance,qq/"issue message i 'DECOM: Node ${node} has vanished.'"/);
+													push @_finished, grep { /ANR2146E/ } @$msgs_ref;
+													print "$instance $node has vanished!\n";return "Finished"}
+		else	{ print "rm_node: $instance @$msgs_ref\n";return "Finished" }
+		}
+}
+
+sub del_files{
+  my $instance = shift;
+	my $node = shift;
+	# Delete filespace, return process number.
+	print "del_files: $instance:del files $node *\n";
+	my ($msgs_ref,$fields_ref) = tsmc($instance,qq/"del files $node *"/);
+	sleep 5; # Del files takes some time to create a process.
+	# ANR1694I Server THEP201 processed command 'DEL FILES VLINUX000569_TST01 * ' and completed successfully.
+	# ANR0852E DELETE FILESPACE: No matching file spaces found for node VLINUX000079_DEV01
+	my $return = (grep { /^(ANR1694I|ANR0852E)/ } @$msgs_ref)[0];
+	for ($return) {
+		if		(/^ANR1694I/) {return get_proc_nr($instance,$node) }
+		elsif	(/^ANR0852E/) {return 0 }
+		else	{ print "del_files *ERROR*: @$msgs_ref\n"; return '0'}
+		}
+}
+
+sub get_proc_nr{
+  my $instance = shift;
+	my $node = shift;
+	# Get proces number of delete filespaces of $node
+	my ($msgs_ref,$fields_ref) = tsmc($instance,qq/"select * from processes where status like '%node $node:%'"/);
+	my $proc_nr = $$fields_ref{PROCESS_NUM} || 0;
+	print "get_proc_nr: @$msgs_ref\n" unless $proc_nr;
+	return $proc_nr;
+}
+
+sub df_count{
+  my $instance = shift;
+	my ($msgs_ref,$fields_ref) = tsmc($instance,qq/"select count(*) as delprocs from processes where process='DELETE FILESPACE'"/);
+	#print map {"df_count: $_ -> $$fields_ref{$_}\n"} keys %$fields_ref;
+	print "df_count: $instance = $$fields_ref{DELPROCS}\n";
+	return $$fields_ref{DELPROCS};
+}
+
+sub status{
+  return $daemon_started . "<newline><tab>Items in input queue: " . scalar @_input . "<newline>" .
+	"<tab>Items in job queue: ". scalar @_jobs . "<newline>".
+	"<tab>Items finished: " . scalar @_finished . "\n";
+}
+
+sub add_to_queue{
+	chomp(my $message = shift);
+	return "Nothing to queue" unless $message;
+
+	# Check for duplicates
+	my $instance_node = $message;
+	$instance_node =~ s/^DECOM: (.+) (.+)/$1 $2/;
+	# Check for duplicate in input queue
+	foreach(@_input){
+		my $instance_node_i = $_;
+		$instance_node_i =~ s/^DECOM: (.+) (.+) .*/$1 $2/;
+		return "Rejected, item $instance_node_i already in input queue\n" if $instance_node eq $instance_node_i;
+	}
+	# Check for duplicate in job queue
+	foreach(@_jobs){
+		my $instance_node_j = $_;
+		$instance_node_j =~ s/DECOM: (.+) (.+) .*/$1 $2/;
+		return "Rejected, item $instance_node_j already in job queue\n" if $instance_node eq $instance_node_j;
+	}
+  push @_input,"$message TIME_0";
+	return "Added \'$message\' to the input queue.\n";
+}
+
+sub Communicate{
+  my $client = shift;
+	my $message = shift;
+	if (ref($message) eq 'ARRAY'){
+		my @array = @{$message};
+		push @array,"Empty" unless @array;
+		print map {">$_\n"} @array;
+ 		store_fd(\@array, $client) or die "Unable to store array: $!\n";
+	}
+	unless (ref($message)){
+	  print ">$message";
+	  print $client "$message\n";
+	}
+}
+
+## Nicely formatted date
+sub dateNow{
+  strftime "%e %B %Y", localtime;
+}
+## Current time
+sub timeNow{
+  strftime "%X" ,localtime;
+}
+
+## Create directories
+sub createDirs{
+  # Directory for socket en pid
+  unless (-d $systemdir){
+    mkdir $systemdir or die "Unable to create $systemdir: $!\n";
+  }
+  # Directory for inputfile, logging etc.
+  unless (-d $workdir){
+    mkdir $workdir or die "Unable to create $workdir: $!\n";
+  }
+}
+
+## Update a special file to show we're alive
+sub timeStamp{
+  my $tsFile = "${systemdir}/_timestamp";
+	do {open TS,'>',$tsFile or die "Unable to open timestamp file $systemdir/_timestamp: $!\n";
+	    print TS "Do not delete: timestamp file for decom/decomd.\n";
+	    close TS;
+	   } unless -e $tsFile;
+	# Update utime, mtime to current time.
+	utime undef, undef, $tsFile or die "Unable to set timestamp of $systemdir/_timestamp: $!\n";
+}
+
+## Check age of timestamp file
+sub active{
+  my $tsFile = "${systemdir}/_timestamp";
+	my $timeStamp = (stat $tsFile)[9] or die "${systemdir}/_timestamp not found! $!\n";
+	# Return 0 if timeStamp older than 10 minutes
+#	return (time - $timeStamp > 60*10)?0:1;
+ 	return (time - $timeStamp > 60)?0:1; # 1 minute for testing
+}
+
+sub tsmc{
+  my ($instance,$command) = (shift,shift);
+	#print "tsmc: Instance: $instance Command: $command\n";
+  my (@msgs,%field_val);
+  open(my $dsmc_fh, "-|", "$TSMC -dataonly=yes -displ=list $instance:$command") or die "Unable to run $TSMC: $!\n";
+  foreach (<$dsmc_fh>){
+	#print "tsmc: (output) $_";
+    if (/^AN\w\d{4}\w\s/){ # Filter out messages
+      push @msgs,$_;
+      next;
+    }
+    if (/^\s*(.+?):\s(.+)\s*$/){ # skip spaces in front of field name and after value
+      $field_val{$1} = $2;
+    }
+  }
+	#if (keys %field_val){ ########### DEBUG
+	#	foreach(keys %field_val){
+	#		print "tsmc field_val: $_ => $field_val{$_}\n";
+	#	}
+	#}
+  close($dsmc_fh);
+  return \@msgs,\%field_val; # Return references for speed and flexability
+}
+
+sub truncate_file{
+    my $file      = shift;
+	my $maxlines  = abs(shift);
+	# Note: If file doesn't exist, it will be created
+	tie my @tied_file, 'Tie::File', $file or die
+			"Unable to open $file for pruning $!";
+	if (@tied_file > $maxlines){
+		@tied_file = splice @tied_file,-$maxlines;
+	}
+	untie @tied_file;
+}
+
+=head1 NAME
+
+decomd - daemon running in the background, decommissioning nodes
+
+=head1 Synopsys
+
+B<decomd [-?|-help]>
+
+This daemon can be run separately, but is normally started by the frontend B<decom>
+
+=head1 Description
+
+The daemon takes a list om decom speudo commands end places it in an input-queue.
+
+This queue is an array, tied to a disk file: B<decom_input_queue>.
+
+Entries from the input queue are placed in B<decom_job_queue> and decomd feeds the appropriate 'delete filespaces' and 'rem node' commands to the appropriate instance. The daemon maximizes the number of delete filespace processes to 3 per TSM instance. For TSM 6 and higher, this number will be raised to 6 in a future version of this script.
+
+When the daemon finaly removes the node from TSM, the node along with the final TSM-message are places in the file decom_finished_<JJJJMMDD>.
+
+Because the input and job queue are arrays tied to disk files, the daemon can at any time be halted with a kill command. No data will get lost. Dont use B<kill -9>, of course! With -9 the daemon probably will lose data.
+
+When the input and job queue are empty, the daemon will terminate after a minute.
+
+Monitor the daemons activity in the log file: tail -f ~/.decom/decomd.log. The decom front end has a menu option to do this.
+
+=head2 Options
+
+=over
+
+=item I<--h>elp I<--?>
+
+Show B<this> page
+
+=back
+
+=head1 Author
+
+Eric de Hont eric-github@hobiho.nl
+
+=head1 To do
+
+...
+
+=head1 Related commands
+
+...
+
+=head1 More information about POD
+
+'B<perldoc perlpod>'
+
+=cut

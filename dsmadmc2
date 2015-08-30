@@ -1,0 +1,80 @@
+#!/usr/bin/perl
+#   .   .   .   .   .   .   .   .   .   .   .   .   .   .   .   .
+#  .                                                              .
+#  .                      ' d s m a d m c 2 '                     .
+#  .                                                              .
+#  .  Author: Eric de Hont - eric-github@hobiho.nl                .
+#  .                                                              .
+#  .  Date:   Mon Dec  2 17:11:03 CET 2013                        .
+#  .                                                              .
+#  .  Short description:                                          .
+#  .                                                              .
+#  .    dsmadmc wrapper wich uses tsmcreds for authentication     .
+#  .                                                              .
+#   .   .   .   .   .   .   .   .   .   .   .   .   .   .   .   .
+use strict;
+use warnings;
+use Getopt::Long qw(:config pass_through);
+use Sys::Hostname;
+use lib 'perllib';
+use TSM::Creds;
+
+my %configmanager = ( aix1234 => 'tsmcfg',
+                      sun0078 => 'tsmcfg2');
+my $hostname = hostname;
+
+# See perldoc Getopt::Long
+my $opt_help; # Define your option vars here.
+my $opt_server = $configmanager{$hostname}; # Default value
+GetOptions('help|h|?' => \$opt_help,
+           "se=s" => \$opt_server)
+    or die "Couldn't parse options: $!\n";
+exec (qq[perldoc $0]) if $opt_help; # Exit showing documentation
+die "\tPerldoc could not be executed: $!\n" if $!;
+
+unshift @ARGV,"-se=$opt_server";
+
+unless ( grep { /-id/ } @ARGV){
+  my $TC = TSM::Creds->new();
+  die "No valid credentials found. Run tsmcreds first.\n" unless $TC->ok;
+  unshift @ARGV,"-pa=".$TC->pa;
+  unshift @ARGV,"-id=".$TC->id;
+}
+
+$| = 1; # Autoflush, don't buffer any output
+
+die "dsmadmc failed: $?\n" unless exec 'dsmadmc', @ARGV;
+
+=head1 NAME
+
+dsmadmc2 - A simple wrapper around dsmadmc whith autentication though the tsmcreds mechanism
+
+=head1 Synopsys
+
+B<dsmadmc2 [-?|-help|-id|-se]>
+
+When -id is missing from the options, the userid and password from ~/.TSMCreds are inserted.
+
+When -se is missing, the configmanager of the current environment (TSM-5 or TSM-6) is chosen.
+
+All other options and command line arguments are passed through to dsmadmc unaltered.
+
+=head1 To do
+
+-add option to specify a password file.
+
+-add option to specify a specific dsmadmc instance.
+
+=head1 Author
+
+Eric de Hont - eric-github@hobiho.nl
+
+=head1 Related commands
+
+dsmadmc
+
+=head1 More information about POD
+
+'B<perldoc perlpod>'
+
+=cut

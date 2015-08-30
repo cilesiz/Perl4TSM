@@ -32,9 +32,9 @@ exec (qq/perldoc $0/) if $opt_help; # Exit showing documentation
 print `clear`;
 print "\t\t t s m c r e d s \n\n";
 mkcfg() unless -r "$0.cfg";
-open CONFIG,'<',"$0.cfg" or die "$0.cfg not found. $!\n";
+open my $conffh,'<',"$0.cfg" or die "$0.cfg not found. $!\n";
 my %config;
-foreach (<CONFIG>){
+foreach (<$conffh>){
 	chomp;
   next if /^#/;
 	/(\S+)\s+(\S+)/;
@@ -60,8 +60,8 @@ sub mkcfg{
 	chomp(my $choice=<STDIN>);
 	die "Terminating.\n" if $choice =~ /^N/i;
 	print "\tGenerating $0.cfg...\n";
-	open NEWCRED,'>',"$0.cfg" or die "Unable to create config file $0.cfg\n";
-	print NEWCRED qq/#---------------------------------------------------------------------\n/.
+	open my $newcred,'>',"$0.cfg" or die "Unable to create config file $0.cfg\n";
+	print $newcred qq/#---------------------------------------------------------------------\n/.
 	              qq/#\t\tTSMCREDS - config file\n/.
 								qq/#---------------------------------------------------------------------\n/.
 	              qq/#\tPlease change the default values as needed\n/.
@@ -74,7 +74,7 @@ sub mkcfg{
 								qq/# The browse only account 'userid:password'\n/.
 		            qq/BROWSER analist:analist\n/.
 		            qq/#---------------------------------------------------------------------/;
-  close NEWCRED;
+  close $newcred;
 	my @vi_cfg = ('vi', "$0.cfg");
 	system(@vi_cfg) == 0 or die "Unable to edit the config-file using vi.$!\n";
   print `clear`;
@@ -136,7 +136,7 @@ sub tsmGetUser{
 		($id,$pa) = (split /:/,$config{'BROWSER'});
 	}
 	my @output;
-	open my $fh, "dsmadmc -se=$config{'CFGMAN'} -id=$id -pa=$pa -displ=list -dataonly=yes $cmd|"
+	open my $fh, "-|","dsmadmc -se=$config{'CFGMAN'} -id=$id -pa=$pa -displ=list -dataonly=yes $cmd"
 		 or die "Cannot run dsmadmc: $!";
 	chomp(@output = <$fh>);
 	close $fh;

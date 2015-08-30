@@ -3,7 +3,7 @@
 #  .                                                              .
 #  .                         ' q n o d e '                        .
 #  .                                                              .
-#  .  Author: Eric (E.) de Hont                                   .
+#  .  Author: Eric de Hont - eric-github@hobiho.nl                .
 #  .                                                              .
 #  .  Date:   Wed May 16 09:15:33 CED 2012                        .
 #  .                                                              .
@@ -254,7 +254,7 @@ Display the status of the  backups of the last seven days, today and tomorrow.
 
 =head1 Author
 
-Eric (E.) de Hont eric-github@hobiho.nl
+Eric de Hont eric-github@hobiho.nl
 
 =head1 To do
 

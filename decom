@@ -1,0 +1,485 @@
+#!/usr/bin/perl
+#   .   .   .   .   .   .   .   .   .   .   .   .   .   .   .   .
+#  .                                                              .
+#  .                   ' d e c o m '                              .
+#  .                                                              .
+#  .  Author: Eric de Hot - eric-github@hobiho.nl                 .
+#  .                                                              .
+#  .  Date:   Tue Dec 31 15:02:34 CET 2013                        .
+#  .                                                              .
+#  .  Short description:                                          .
+#  .                                                              .
+#  .    Front end for decommissioning of TSM nodes                .
+#  .                                                              .
+#   .   .   .   .   .   .   .   .   .   .   .   .   .   .   .   .
+use strict;
+use warnings;
+use lib 'perllib';
+use File::Temp;
+use Storable qw(fd_retrieve nstore store_fd nstore_fd freeze thaw dclone);
+# See perldoc Getopt::Long
+use Getopt::Long qw(:config posix_default);
+use POSIX ":sys_wait_h";
+use Fcntl;
+use IO::Socket;
+use TSM::Admc qw(:DEFAULT vrfy_creds);
+use TSM::Util;
+
+my $opt_help; # Define your option vars here.
+GetOptions('help|h|?' => \$opt_help) or die
+			"Couldn't parse options: $!\n";
+if ($opt_help){
+  die "\tPerldoc could not be executed: $!\n" unless
+    exec (qq[perldoc $0]); # Exit showing documentation
+};
+
+# Global variables
+my $systemdir = "$ENV{HOME}/.decomd";
+my $workdir   = "$ENV{HOME}/Decom";
+my $socket    = "${systemdir}/decomd.sock";
+my $TSMC = '/appl/tsmserv/scripts/tools/dsmadmc2';
+die "dsmadmc2 (dsmadmc with authentication) not found." unless -X $TSMC;
+my $CLEAR     = `clear`; # Clear screen character
+my @DECOM_validated; # The expanded list of CI's (TSM-instances added)
+
+# Verify that supplied credentials are correct before doing
+# anything else.
+my $id = vrfy_creds() or die "Unable to use .TSMCreds-file. Run tsmcreds first?";
+print "TSM-ID used for this script: $id\n";
+sleep 1;
+
+## Start the deamon
+## It will find out itself whether it was already running
+start_daemon();
+
+## Start with painting the menu
+print mkmenu();
+
+## The main loop of this program
+while (1){
+  user_interface();
+}
+
+## The userinterface waits for a keypress for 1 second
+## After that the screen is updated.
+## Because the keyboard buffer is cleared every second,
+## this causes the program to miss the keypress, every
+## now and then. Ask users if they find that annoying.
+sub user_interface{
+  local $|=1;
+	my ($sec,$min,$hour,undef)=localtime();
+	my $timestring = sprintf("%02d:%02d:%02d", $hour,$min,$sec);
+	print mkmenu() unless ($sec % 20); # Refresh at multiple of 20 secs
+
+  eval {
+  local $SIG{ALRM} = sub { die "alarm clock restart" };
+    alarm 1;
+    eval {
+          #############
+        	my $key = keyPress();
+ 	  			alarm 0; # Switch off time out
+          for ($key) {
+        		if		(/[rR]/) {alarm 0;print ">>>Refreshing...";sleep 2}
+        		elsif	(/[iI]/) {alarm 0;print $CLEAR; user_input()}
+        		elsif	(/[sS]/) {alarm 0;submit();sleep 2}
+        		elsif	(/[dD]/) {alarm 0;discard_input();sleep 2}
+        		elsif	(/[lL]/) {alarm 0;tail_log();sleep 2}
+        		elsif	(/[qQ]/) {alarm 0;print "Quit!\n"; sleep 1;print "\e[9B";exit}
+        		elsif	(/[1]/)  {alarm 0;print ">>>Please wait..."; input_queue();sleep 1}
+        		elsif	(/[2]/)  {alarm 0;print ">>>Please wait..."; running(); sleep 3}
+        		elsif	(/[3]/)  {alarm 0;print ">>>Please wait..."; finished();sleep 3}
+        		elsif	(/^$/)   {alarm 0;print "\e[1A" }
+        		else					 {alarm 0;print ">>>Refreshing...";sleep 2 }
+        		}
+						print mkmenu();
+          #############
+      };
+      alarm 0;
+    };
+    alarm 0;
+    die "Error in ALARM: $!" if $@ && $@ !~ /alarm clock restart/; #reraise
+		print "\e[1A\e[10D$timestring\e[K\n?\e";
+}
+
+sub mkmenu{
+  timeStamp(); # Update the timestamp file, so the daemon keeps running
+	my $status = Communicate("status");
+	$status =~ s/\<newline\>/\n/g;
+	$status =~ s/\<tab\>/\t/g;
+	my $header = "$CLEAR"
+	. '#' x 60
+	. "\n#" . ' ' x 19 . " *** TSM DECOM ***". ' ' x 21 . "#\n" 
+	. '#' x 60 
+	. "\n\t\t\tMenu\n\t\t\t----\n"
+	. "\n\t\tI = Input CI's (nodes)\n\t\tS = Submit input to decomdaemon\n"
+	. "\t\tD = Discard input\n\t\tL = Tail Log file\n"
+	. "\n\t\t1 = Show input queue\n\t\t2 = Show running jobs\n"
+	. "\t\t3 = Show finished jobs\n" 
+	. '#' x 60 
+	. "\nR = Refresh screen Q = Quit\n" 
+	. "\n\n\n-Choices are case insensitive\n"
+	. "-Screen refreshes every 20 seconds\n"
+	. '#' x 60 
+	. "\n  " . $status ."\n" 
+	. '#' x 60 
+	. "\n\e[10A";
+	return $header;
+}
+
+## Process the user input
+sub input_queue{
+	alarm 0;
+	print "${CLEAR}INPUT queue\n\n";
+  my $input_ref = Communicate_fd("input");
+	my @input = @{$input_ref};
+	if ($input[0] =~ /Empty/){
+		print "Input queue is empty.\n";
+	}else{
+	  foreach (@input){
+	  	my ($decom,$instance,$node,$time) = split;
+	  	$time =~ s/TIME_//;
+	  	$time = $time - time();
+	  	# Negative time look stupid. Make them 0.
+	  	$time = 0 if $time != abs($time);
+	  	print "$decom $instance $node (revaluation in $time sec.)\n";
+	  }
+	}
+	sleep 5;
+}
+
+## Show the running jobs
+sub running{
+	alarm 0;
+	print "${CLEAR}RUNNING Jobs\n\n";
+  my $running_ref = Communicate_fd("running");
+	my @running = @{$running_ref};
+	print map {"$_\n"} @running;
+	sleep 5;
+}
+
+## Show the finished jobs of today
+sub finished{
+	alarm 0;
+	print "${CLEAR}FINISHED Nodes\n\n";
+  my $finished_ref = Communicate_fd("finished");
+	my @finished = @{$finished_ref};
+	print map {"$_\n"} @finished;
+	sleep 5;
+}
+
+## Throw away the user input
+sub discard_input{
+  if(@DECOM_validated){
+	  @DECOM_validated = ();
+    print "Input discarded\n";
+	}else{
+    print ">>>Nothing to discard.\n";
+	}
+}
+
+## See which key the user pressed
+sub keyPress{
+  local $|=1;
+	# Flush keyboard buffer
+  my $s=`stty -g`;
+	print `stty -icanon min 0 time 0`;
+	print `cat </dev/tty >/dev/null`;
+	print `stty $s`;
+	# Get a single key
+  system "stty", '-icanon', 'eol', "\001";
+	my $key = getc(STDIN);
+	system "stty", 'icanon', 'eol', '^@'; # ASCII null
+	print "\e[2D\e[K";
+	return $key;
+}
+
+## Establish a connection with the daemon
+sub Communicate{
+	start_daemon(); # Just in case
+	my $clnt_message = shift;
+	$clnt_message .= "\n";
+  my $client = IO::Socket::UNIX->new(Peer      => $socket,
+                                     Type      => SOCK_STREAM,
+                                     Timeout   => 30  ) or die "Could not open socket: $@ $!";
+  print $client $clnt_message;
+  chomp(my $answer = <$client>);
+  close $client;
+	return $answer;
+}
+
+## The same as above, but for receiving binary data (i.c. arrays)
+sub Communicate_fd{
+## Use store_fd on the other side for sending array or hash
+## Use fd_retrieve on this side to receive array or hash
+	start_daemon(); # Just in case
+	my $clnt_message = shift;
+	$clnt_message .= "\n";
+  my $client = IO::Socket::UNIX->new(Peer      => $socket,
+                                     Type      => SOCK_STREAM,
+                                     Timeout   => 30  ) or die "Could not open socket: $@ $!";
+  print $client $clnt_message;
+	my $reference = fd_retrieve($client) or die "Unable to retrieve: $! \n";
+	return $reference;
+}
+
+## Send validated DECOM-commands to TSM
+sub submit{
+  ## Send input to the daemon
+  if (! @DECOM_validated){
+		print "${CLEAR}Nothing to submit!\n";
+		sleep 2;
+		return 1;
+	}
+	print "${CLEAR}Submitting input to decom daemon...\n\n";
+	my @DECOM_submit = grep { /^DECOM/ } @DECOM_validated;
+	if (@DECOM_submit){
+	  foreach (@DECOM_validated){
+	  	next unless /^DECOM/;
+	  	print ">$_";
+	    print "<" . Communicate($_."\n") . "\n\n";
+  	}
+	}else{
+		print "NO nodes in list to decomission.\n";
+	}
+	  @DECOM_validated = ();
+}
+
+## Ask user for confirmation
+sub confirm{
+  my $question = shift;
+	print $CLEAR, $question,"\n" ,"OK to continue? [yN]: " ;
+  chomp(my $ok = <STDIN>); 
+	return 1 if $ok =~ /^y$/i;
+	return 0;
+}
+
+## Validate and process the user input
+sub user_input{
+	my @user_input;
+	timeStamp();
+
+	if (@DECOM_validated){
+		if (! confirm("This action will discard your current DECOM-data.")){
+		return 1;
+  		}
+	}
+
+	# This temporary file will hold decom-information for
+	# the user to edit
+	my $tmp_file = mktemp( q{/tmp/decom_userinput_XXXXX} );
+
+	print $CLEAR, qq{Type or paste a list of CI's. The script will look }
+				  , qq{them up in TSM.\nEmpty line ends input.\n\n};
+	while(<STDIN>){
+		chomp;
+		# Exit input loop if it was just white spaces  (or just an enter)
+		if (m/^ \s* $/xms){
+			last;
+		}
+		else{
+			push @user_input,split(/\s/,$_);
+		}
+    }
+
+	timeStamp();
+
+	print "Validating data, please wait...\n\n";
+	sleep 1;
+	@user_input = grep {!/^\s*$/} @user_input;
+	if (!@user_input){
+		print "No input.\n";
+		return 1;
+	}
+
+	# Throw away discarded user input
+	@DECOM_validated = (init_decom($tmp_file));
+
+	my ($instance,$node,$field,$value,@qnode,@qn_errors,%qn_instance_nodes);
+	while(@user_input){
+		## Process the CI's provided by user
+		my $ci = shift(@user_input);
+		print "### Validating CI: $ci\n";
+		@qnode     = q_node($ci); # qnode from TSM::Util
+
+		@qn_errors = grep { m{\A \< .+? \>: \s A.* \z}xms} @qnode;
+		@qnode     = grep {!m{\A \< .+? \>: \s A.* \z}xms} @qnode;
+
+		# Next node if not found
+		if ($qnode[0] =~ m{ \A .+? \s not \s found. \z }xms ){
+			push @DECOM_validated,"### $& ###\n";print "### $& ###\n";
+			push @DECOM_validated,"#\n";
+			next;
+		}
+
+		# Put config and occupancy information in array
+		foreach(@qnode){
+            my ($instance,$node,$field,$value) = /(.*?):(.*?):(.*?):(.*)/;
+			next unless $instance;
+			next unless $field
+				=~ m{ NODE_NAME | PLATFORM_NAME | LastAcc | LOCKED |
+				      REG_ADMIN | CONTACT
+					}xms;
+			if ($field eq 'NODE_NAME'){
+            	 push @{$qn_instance_nodes{$instance." $node"}},"$instance";
+			}
+ 		    push @{$qn_instance_nodes{$instance." $node"}},
+			 				sprintf("     %s %-15s: %s", $node, $field, $value);
+        }
+	}
+
+		foreach my $instance_node (sort keys %qn_instance_nodes){
+ 		   my $instance = $instance_node;
+ 		   $instance =~ s/\s.*//;
+ 		   my $node  =  $instance_node;
+ 		   $node     =~ s/.+?\s//;
+           push @DECOM_validated,"#\nDECOM: $instance_node\n";
+		   print "\nDECOM: $instance_node\n";
+ 		   print map {"# $_\n"} @{$qn_instance_nodes{$instance_node}};
+ 		   push @DECOM_validated, map {"# $_\n"} @{$qn_instance_nodes{$instance_node}};
+ 		   print map {"# $_\n"} formatted_occupancy($instance,$node);
+ 		   push @DECOM_validated, map {"# $_\n"} formatted_occupancy($instance,$node);
+		 }
+	push @DECOM_validated,@qn_errors;
+    
+	push @DECOM_validated,("#\n",'#' x 50);
+
+	# Create temporary file and use it as edit buffer
+    open INP,'>',$tmp_file or die "Unable to open $tmp_file for output: $!\n";
+	print INP @DECOM_validated;
+	close INP;
+
+	# Open the temporary file in vi
+	system( "vi -c19 $tmp_file" );
+    open INP,'<',$tmp_file or die "Unable to open $tmp_file for input: $!\n";
+	@DECOM_validated = (<INP>);
+	close INP;
+	unlink $tmp_file;
+	timeStamp();
+}
+
+# Present occupancy in acceptable format
+sub formatted_occupancy{
+	my ($instance,$node) = (shift, shift);
+	my @occ = q_occupancy($instance,$node);
+	return ' ' x 4 . $occ[0] if $occ[0] eq "No backup or archive data found.";
+	my %occ_line;
+	foreach (@occ){
+		my ($type,$field,$val) = split /:/;
+		$occ_line{$type} .= 
+		     sprintf("%10s |", $val);
+	}
+	unshift my @output, "|----Occupancy:------Type-----Files---------GB----|";
+	my $dots = '|' . '-' x (length($output[0]) -2) . '|';
+	push @output, $dots;
+	foreach my $type (sort keys %occ_line){
+		push @output, '|' . ' ' x 14 . $occ_line{$type};
+	}
+	push @output, $dots;
+	return @output
+}
+
+# Open the logfile with tail
+sub tail_log{
+	print "$CLEAR\n\n\tShowing tail of $systemdir/decomd.log\n"
+	. "\t Stop watching the log file using <Crtl>-C and wait a second.";
+	sleep 3;
+	system( "tail -f -n 500 $systemdir/decomd.log" );
+}
+
+## Update a timestamp file to signal activity
+sub timeStamp{
+  my $tsFile = "${systemdir}/_timestamp";
+  if (-e "$tsFile"){
+  # Update utime, mtime to current time.
+  utime undef, undef, $tsFile or die "Unable to set timestamp of $systemdir/_timestamp: $!\n";
+  }
+}
+
+## Start up the deamon
+## If it wasn't already running, give it some time to get started.
+sub start_daemon{
+  ## Start daemon !!!!!!!!!!!!!! Set path, somewhere.
+  my $message = qx/decomd 2>&1/;
+  ## Give the daemon time to get up and running
+  sleep 2 unless $message =~ /already running/;
+}
+
+sub init_decom {
+	my $tmp_file = shift;
+	my $text = <<"END_OF_HEADER";
+\t**********************************************************************
+\t*****                                                             ****
+\t*****  TSM-decom input list                                       ****
+\t*****                                                             ****
+\t*****  Lines with format 'DECOM <instance> <node>' will be        ****
+\t*****  executed as decommissioning commands.                      ****
+\t*****                                                             ****
+\t*****  Place a '#' in front of commands that should be ignored.   ****
+\t*****                                                             ****
+\t**********************************************************************
+\t**** Filename: $tmp_file
+\t**********************************************************************
+\t**** The nodes will not be removed yet!                           ****
+\t**** To start removing the nodes you have to choose 'Commit' in   ****
+\t**** the user interface later.                                    ****
+\t**********************************************************************
+\n
+END_OF_HEADER
+
+	return $text;
+}
+
+=head1 NAME
+
+decom - Front end for decommissioning of TSM nodes
+
+=head1 Synopsys
+
+B<decom [-?|-help]>
+
+=head1 Description
+
+Nodes entered get searched in the current TSM-environment (derived from hostname). Wildcards are silently placed before and after the node name, so ub_<node> and <node>_tdp will be added to the results.
+
+The search results are presented with vi, so one could remove nodes from the list that are not to be decommissioned.
+
+With the menu option S, the list is send to de daemon process B<decomd>, which takes care of the actual removal of the nodes.
+
+New nodes can be added to the input queue at any time.
+
+=head2 Related information
+
+ The script keeps the input queue, job queue and finished items in
+ files in the directory ~/Decom
+
+ The directory ~/.decom contains a socket file for communication
+ with the daemon, a timestamp file to signal that the daemon is alive
+ and the logfile decomd.log.
+
+=head2 Options
+
+=over
+
+=item I<--h>elp I<--?>
+
+Show B<this> page
+
+=back
+
+=head1 Author
+
+Eric de Hont eric-github@hobiho.nl
+
+=head1 To do
+
+...
+
+=head1 Related commands
+
+...
+
+=head1 More information about POD
+
+'B<perldoc perlpod>'
+
+=cut

@@ -1,0 +1,108 @@
+#!/usr/bin/perl
+#   .   .   .   .   .   .   .   .   .   .   .   .   .   .   .   .
+#  .                                                              .
+#  .                       ' p a s s g e n '                      .
+#  .                                                              .
+#  .  Author: Eric (E.) de Hont - eric-github@hobiho.nl           .
+#  .                                                              .
+#  .  Date:   Tue Apr  1 10:17:39 CED 2014                        .
+#  .                                                              .
+#  .  Short description:                                          .
+#  .                                                              .
+#  .  Generate a password                                         .
+#  .                                                              .
+#   .   .   .   .   .   .   .   .   .   .   .   .   .   .   .   .
+use strict;
+use warnings;
+use Getopt::Long qw(:config posix_default);
+
+# See perldoc Getopt::Long
+use lib 'perllib';
+
+my $opt_help;    # Define your option vars here.
+GetOptions( 'help|h|?' => \$opt_help ) or die "Couldn't parse options: $!\n";
+if ($opt_help) {
+    die "\tPerldoc could not be executed: $!\n"
+      unless exec(qq[perldoc $0]);    # Exit showing documentation
+}
+
+# maandnummer 01..12
+my $month = qx{date "+%m"`};
+
+# Gebruik standaardwoordenboek als bron
+open( my $fh, '<', '/usr/share/dict/words' ) or die "Woordenboek niet gevonden: $!\n";
+
+# Woorden van 6 letters (geen leestekens) uit de file greppen
+my @words = grep {
+                        /^
+                        [\w]{6} # Alleen 'echte' letters, geen "'", bijv.
+                        $/xms
+                        } <$fh>;
+
+close($fh);
+
+#Default 10 wachtwoorden
+for ( my $loopvar = $ARGV[0] || 10 ; $loopvar >= 1 ; $loopvar-- ) {
+    die "Meer suggesties heb ik niet, sorry!\n" unless @words;
+
+    # splice(array,offset,length) geeft je een of meer elementen uit een array
+    # en verwijdert deze uit de array.
+    # Voeg de maandnummer toe aan het eind.
+    print ucfirst( splice( @words, rand @words, 1 ) ), $month;
+}
+
+=head1 NAME
+
+passgen - generate a list of password suggestions
+
+=head1 Synopsys
+
+B<passgen [-?|-help] <number> >
+
+Generate a list of B<number> password suggestions. 10 if number is omitted.
+
+=head1 Description
+
+Help with choosing a valid password.
+
+=head2 Options
+
+=over
+
+=item I<--h>elp I<--?>
+
+=back
+
+Show B<this> page
+
+=over
+
+=item B<number>
+
+Generatie a list I<number> passwords, instead of 10. N.B.: the length of the list is limited by the number of words in /usr/dict/words that could be used to generate  a password.
+
+=back
+
+=head1 Examples
+
+=over
+
+=item B<passgen> 5
+
+ Twisty04
+ Excite04
+ Denial04
+ Afresh04
+ Career04
+
+=back
+
+=head1 Author
+
+Eric de Hont eric-github@hobiho.nl
+
+=head1 More information about POD
+
+'B<perldoc perlpod>'
+
+=cut
